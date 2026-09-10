@@ -1,0 +1,26 @@
+# Cached exchange responses. Regenerated on demand and large.
+.bme-cache/
+*.cache
+
+# Trade exports - yours, not the repo's
+*.csv
+
+__pycache__/
+*.py[cod]
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
