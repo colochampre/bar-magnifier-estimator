@@ -1,6 +1,7 @@
 # bar-magnifier-estimator
 
-Estimate what TradingView's **Bar Magnifier** would do to a strategy, without paying for it.
+Estimate what TradingView's **Bar Magnifier** would do to a strategy, without paying for it — and how
+far below *that* the strategy would really land.
 
 Bar Magnifier resolves what happened *inside* each chart candle. Without it, a backtest has to
 guess the intrabar path — and when a strategy opens and closes trades inside a single candle,
@@ -11,14 +12,26 @@ and 79% of the reported profit.
 This library replays your exported trades against finer candles from the exchange, applying your
 exit rules at that finer resolution. Pure standard library — no dependencies, no API keys.
 
+It answers two different questions, and it matters which one you are asking:
+
+| Question | Replay at | Why |
+|---|---|---|
+| What would TradingView report with Bar Magnifier on? | TradingView's intrabar timeframe — **30m on a 4h chart** | [documented by TradingView](https://www.tradingview.com/support/solutions/43000669285-what-is-bar-magnifier-backtesting-mode/), and confirmed by calibration |
+| What would the strategy actually have done? | the finest timeframe you can afford | the magnifier itself still guesses inside each 30m bar |
+
 ---
 
 ## What it is not
 
-**It does not reproduce Bar Magnifier. It estimates it.** The granularity that best matches the
-real feature was found by calibrating against six exports of one strategy on one exchange. For a
-different strategy, that calibration may not transfer, and without a reference run there is
-nothing to anchor it to. Say so when you report numbers produced this way.
+**It does not reproduce Bar Magnifier exactly. It estimates it.** TradingView documents which
+lower timeframe the magnifier uses for each chart timeframe, and replaying at that timeframe
+matched six real magnifier exports of one strategy better than any other granularity. Exchange
+data and fill details can still move the result; say so when you report numbers produced this way.
+
+**Finer is more realistic, not exact.** Every step down in granularity reveals intrabar moves the
+coarser one hid, and the estimate keeps moving — it converges, but slowly. On the reference
+strategy, going from 15m to 5m still took 8–22 points off each pair's total. Treat the finest
+replay as the closest estimate you have, not as ground truth.
 
 **It only handles price-level exits** — stops, targets, trailing stops, break-even, time stops.
 If a strategy exits on an indicator (a moving-average cross, an RSI level, an opposite signal),
@@ -65,14 +78,17 @@ my_rules = [
     rules.StopLoss(5.0),
 ]
 
-# 3. Validate at the chart timeframe, then estimate finer.
+# 3. Validate at the chart timeframe, then replay finer: once at TradingView's
+#    intrabar timeframe, once as fine as you can afford.
 trades = tradingview.read_trades("export.csv", offset)
-baseline, fine, ok = estimate.compare(
-    trades, provider, "AAVEUSDT", "4h", "15m", my_rules, commission_pct=0.1)
+baseline, magnifier, ok = estimate.compare(
+    trades, provider, "AAVEUSDT", "4h", "30m", my_rules, commission_pct=0.1)
 
 print(report.validation(baseline, ok))
 if ok:
-    print(report.comparison(baseline, fine))
+    realistic = estimate.run(trades, provider, "AAVEUSDT", "5m", my_rules, commission_pct=0.1)
+    print(report.comparison(baseline, magnifier, "what TradingView would report"))
+    print(report.comparison(baseline, realistic, "closest to reality"))
 ```
 
 A full run is in [`examples/rsi_divergence.py`](examples/rsi_divergence.py).
@@ -96,22 +112,46 @@ byte-identical duplicates, and nothing but a price check would have caught it.
 ran on must reproduce the export. This is the only evidence your rules describe the strategy.
 Below ~90% signal match, fix the rules — every finer number is noise until this passes.
 
+The engine walks each candle with TradingView's
+[documented rule](https://www.tradingview.com/pine-script-docs/concepts/strategies/): the high
+first when the open sits closer to the high, the low first otherwise. An earlier version ordered
+by candle colour instead. It disagreed on about one candle in six and cost 3–4 points of match
+rate — small enough to look fine, large enough to bias every estimate built on top.
+
 **4. Only then, replay finer.** A high match at the chart timeframe and a very different result
 at finer granularity is the expected outcome. That gap is what you came to measure.
 
 **5. Calibrate if you can.** If you have one strategy exported both with and without Bar
 Magnifier, `calibrate` sweeps granularities and reports which reproduces the real effect. On the
-reference strategy — a 4h chart — the answer was **15 minutes**:
+reference strategy — a 4h chart — the answer was **30 minutes**, exactly the intrabar timeframe
+TradingView documents for that chart:
 
-| Granularity | Error vs. real magnifier | Estimated change |
-|---|---|---|
-| 1h | 0.752 | −41.1% |
-| 30m | 0.366 | −57.7% |
-| **15m** | **0.180** | **−65.5%** |
-| 1m | 0.399 | −76.1% |
+| Granularity | Error vs. real magnifier, AAVE + BAT + SOL |
+|---|---|
+| 1h | 1.150 |
+| **30m** | **0.633** |
+| 15m | 1.070 |
 
-The real magnifier measured −63.2%. Replaying at 1 minute overstates the damage by ~15 points:
-finer is not automatically more accurate, it is just finer.
+An earlier version of this README said 15 minutes. That came from calibrating on a single pair,
+against an averaged reference, with the colour rule: on that one pair 15m happened to score best,
+while the other two already preferred 30m. Calibrate on several pairs, each against its own
+reference.
+
+**6. If you want reality, keep going.** Matching the magnifier is not the same as matching what
+happened — it still guesses inside every 30m bar. Replay finer and watch the estimate move:
+
+| Pair | 4h | 30m | 15m | 5m |
+|---|---|---|---|---|
+| AAVE | 428% | 223% | 197% | 182% |
+| ALICE | 336% | 206% | 161% | 139% |
+| BAT | 346% | 212% | 191% | 173% |
+| DOGS | 207% | 118% | 103% | 95% |
+
+Each halving of the granularity moves it by a third to a half of the previous step: converging,
+not converged. On a trailing-stop strategy finer is always more pessimistic, because every extra
+level of detail exposes retracements that fire the trailing earlier. For decisions with real money,
+report the finest replay you can afford and show the magnifier-equivalent beside it — that gap is
+exactly what the Strategy Tester will never show you.
 
 ---
 
@@ -182,7 +222,24 @@ print(r.cagr, r.max_drawdown, r.mar, r.skip_rate)
 for more margin, so **it does not buy more positions — it scales the result of each one**. And
 `reinvest=True` (the default) compounds: margin follows equity. Turn it off and every order stays
 the size of the first, which is what a fixed-size backtest reports and is usually far lower — on
-the reference strategy, 42% CAGR compounding against 24% flat.
+the reference strategy, 26% CAGR compounding against 18% flat.
+
+### One position per symbol
+
+Replayed trades take their entries from the export, stamped at chart-bar resolution, and their
+exits from the finer replay. That makes some trades look like they overlap the next one on the
+same symbol, and there are two very different reasons:
+
+- **The next entry opens inside the bar where the previous trade exited.** A strategy that
+  recalculates on fills re-enters right after an intrabar exit, and the export stamps that entry
+  with the bar's open. It really happened.
+- **The next entry opens in an earlier bar.** Live, the position would still be open and the signal
+  would not have fired.
+
+`sequence(trades, chart_seconds)` keeps the first kind (clamping the previous exit) and drops the
+second; pass `one_per_key=True` to `simulate` as a guard. The obvious rule — drop every overlap —
+threw away legitimate re-entries on the reference strategy and cut per-pair t-statistics by up to
+a fifth. Every one of those exports had zero real overlaps.
 
 ### Pick a fraction that is not on a boundary
 
@@ -195,16 +252,21 @@ Two admission rules ship, and the gap between them is the point:
 
 They agree almost everywhere. Where they don't, the fraction is sitting on a **1/n boundary** —
 n positions consume exactly the whole pool, and a rounding-scale move in equity decides whether
-the next one fits. `boundary_fractions(sweep(...))` names them:
+the next one fits. `boundary_fractions(sweep(...))` names them. On the reference strategy — three
+pairs, replayed at 5m, sequenced as above:
 
 ```
   margen    max  perdido     CAGR   maxDD    MAR    CAGR 2x
-     20%      4     0.0%    32.8%   10.8%   3.04      72.2%
-     25%      4     0.0%    42.0%   13.4%   3.14      94.4%  <- borde
-     30%      3     1.4%    48.0%   16.0%   3.00     108.0%
-     40%      2    12.1%    55.0%   20.7%   2.66     122.7%
-     50%      2    12.1%    70.9%   25.4%   2.79     159.3%  <- borde
+     20%      3     0.0%    20.6%   10.2%   2.02      43.4%
+     25%      3     0.0%    26.1%   12.6%   2.07      55.6%
+     30%      3     0.0%    31.7%   14.9%   2.12      68.2%
+     40%      2     2.8%    41.7%   16.0%   2.61      90.6%
+     50%      2     2.8%    53.4%   19.7%   2.71     116.7%  <- borde
 ```
+
+Note that 20% and 25% divide the pool exactly and still are not boundaries here: with three
+symbols the fourth and fifth slots never fill, so there is nothing to disagree about. A boundary
+only bites when the pool actually reaches it.
 
 A boundary fraction is not wrong, it is *unstable*: its result depends on details that should not
 matter. Move to a neighbour. See [`examples/pool.py`](examples/pool.py).

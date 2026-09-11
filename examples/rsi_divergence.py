@@ -4,13 +4,20 @@ RSI Divergence v1.3 on Binance perpetual futures, 4h chart. Its exits are price
 levels only - a fixed stop plus a trailing stop - which is exactly the shape the
 engine handles.
 
-Two configurations appear below, and the distinction matters more than it looks.
-LEGACY is the one whose Bar Magnifier effect was measured directly, by exporting
-it twice with the feature off and on; its coefficients are the only thing that
-can anchor a granularity sweep. CURRENT is the configuration that came out of
-tuning. You can estimate either, but you can only *calibrate* against a
-reference measured with the same rules - a trailing stop arming at +1% behaves
-nothing like one arming at +3%.
+It replays twice, because there are two different questions:
+
+  30m  what TradingView would report with Bar Magnifier on. TradingView
+       documents 30m intrabars for a 4h chart, and calibration against real
+       magnifier exports agreed.
+  5m   as close to what actually happened as the download allows. The
+       magnifier still guesses inside each 30m bar; finer candles guess less.
+
+Two configurations appear below, and that distinction matters too. LEGACY is
+the one whose Bar Magnifier effect was measured directly, by exporting it twice
+with the feature off and on; its coefficients are the only thing that can
+anchor a granularity sweep. CURRENT came out of tuning. You can estimate either,
+but you can only *calibrate* against a reference measured with the same rules -
+a trailing stop arming at +1% behaves nothing like one arming at +3%.
 
     python examples/rsi_divergence.py export.csv AAVEUSDT
     python examples/rsi_divergence.py export.csv AAVEUSDT --legacy
@@ -23,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bme import candles, estimate, report, rules, tradingview
 
 CHART_TF = "4h"
-FINE_TF = "15m"
+MAGNIFIER_TF = "30m"             # TradingView's documented intrabar timeframe for 4h
+REALISTIC_TF = "5m"              # finer is closer to reality; 1m works but downloads a lot
 COMMISSION = 0.1                 # 0.05% per side
 
 
@@ -50,9 +58,9 @@ def legacy_rules():
 
 
 #: Points per trade given up when the real Bar Magnifier was switched on, by
-#: the exit the coarse run recorded. Measured on OKX exports of AAVE, BAT and
-#: SOL running LEGACY_RULES; the three pairs agreed to within 0.08 points.
-#: Only valid for legacy_rules().
+#: the exit the coarse run recorded, averaged over OKX exports of AAVE, BAT and
+#: SOL running legacy_rules(). Per pair they differ by up to 0.1 points; for a
+#: sweep worth trusting, calibrate each pair against its own reference.
 LEGACY_REFERENCE = {"TP": -1.433, "Trailing": -0.371, "SL": +0.216}
 
 
@@ -79,17 +87,19 @@ def main(csv_path, symbol, *flags):
     trades = tradingview.read_trades(csv_path, offset)
     print("loaded %d completed trades" % len(trades))
 
-    baseline, fine, ok = estimate.compare(
-        trades, provider, symbol, CHART_TF, FINE_TF, exit_rules(), COMMISSION)
+    baseline, magnifier, ok = estimate.compare(
+        trades, provider, symbol, CHART_TF, MAGNIFIER_TF, exit_rules(), COMMISSION)
 
     print(report.validation(baseline, ok, symbol))
     if not ok:
-        print("\nStopping: the rules do not reproduce the export, so the %s" % FINE_TF)
-        print("estimate would not mean anything. Fix the rules first.")
+        print("\nStopping: the rules do not reproduce the export, so no finer replay")
+        print("would mean anything. Fix the rules first.")
         return 1
 
-    print(report.comparison(baseline, fine, symbol))
-    print(report.degradation_table(estimate.degradation(baseline, fine)))
+    print(report.comparison(baseline, magnifier, symbol + " - what TradingView would report"))
+    realistic = estimate.run(trades, provider, symbol, REALISTIC_TF, exit_rules(), COMMISSION)
+    print(report.comparison(baseline, realistic, symbol + " - closest to reality"))
+    print(report.degradation_table(estimate.degradation(baseline, realistic)))
 
     paid = estimate.funding_cost(trades, provider, symbol)
     avg = sum(paid) / len(paid)
