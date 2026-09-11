@@ -109,26 +109,32 @@ def _span(trades, timeframe_seconds, pad_bars):
     return lo, hi
 
 
-#: Above this many candles, fetching one continuous series costs more requests
-#: than fetching a window per trade - trades occupy a fraction of the calendar.
-_CONTINUOUS_LIMIT = 200_000
+#: Most candles held in memory for one continuous fetch. Five years at 5m is
+#: about 525k; at 1m it is 2.6M, and that is where memory - not requests - binds.
+_CONTINUOUS_LIMIT = 800_000
+_PAGE = 1500
 
 
 def run(trades, provider, symbol, timeframe, rules, commission_pct=0.0,
         max_hold_hours=240, pad_bars=200):
     """Replay every trade at one granularity.
 
-    Candles are fetched as one continuous series when that is cheap, and as a
-    window per trade when it is not. A 5-year span at 1-minute resolution is
-    2.4M candles; the same trades need a few hundred windows, because they are
-    only in the market a fraction of the time.
+    Candles come either as one continuous series or as a window per trade,
+    whichever needs fewer requests. Sparse, short trades favour windows, since
+    they only occupy part of the calendar; a long holding horizon flips that,
+    because each window then spans several pages. Five years at 5m is 350
+    continuous pages against roughly 750 in windows - picking by candle count
+    alone got that backwards.
     """
     from .candles import SECONDS
     step = SECONDS[timeframe]
     lo, hi = _span(trades, step, pad_bars)
     max_bars = max(2, int(max_hold_hours * 3600 / step))
+    span_bars = (hi - lo).total_seconds() / step
+    continuous_pages = math.ceil(span_bars / _PAGE)
+    windowed_pages = len(trades) * math.ceil(max_bars / _PAGE)
 
-    if (hi - lo).total_seconds() / step <= _CONTINUOUS_LIMIT:
+    if span_bars <= _CONTINUOUS_LIMIT and continuous_pages <= windowed_pages:
         series = provider.series(symbol, timeframe, lo, hi)
         pairs = list(engine.replay_all(trades, series, rules, commission_pct, max_bars))
         return Result(timeframe, pairs)
