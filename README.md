@@ -163,6 +163,54 @@ been flagged as a major risk turned out to be a small credit.
 
 ---
 
+## The pool
+
+Per-trade results say whether a strategy has an edge. They do not say what an account running
+several of them would have done, because they compete for the same capital — a signal arriving
+while the pool is committed is not a smaller position, it is *no* position.
+
+```python
+from bme.portfolio import Trade, simulate, sweep, boundary_fractions
+
+trades = [Trade("aave", entry, exit, ret), ...]      # from several strategies
+
+r = simulate(trades, fraction=0.30, leverage=2, admission="slots")
+print(r.cagr, r.max_drawdown, r.mar, r.skip_rate)
+```
+
+`fraction` is the **margin** an order commits. Leverage multiplies the notional without asking
+for more margin, so **it does not buy more positions — it scales the result of each one**. And
+`reinvest=True` (the default) compounds: margin follows equity. Turn it off and every order stays
+the size of the first, which is what a fixed-size backtest reports and is usually far lower — on
+the reference strategy, 42% CAGR compounding against 24% flat.
+
+### Pick a fraction that is not on a boundary
+
+Two admission rules ship, and the gap between them is the point:
+
+- **`slots`** — at most `floor(1/fraction)` positions. Scale-invariant, so the trade set is
+  identical across leverage.
+- **`margin`** — realistic. Margin is posted at entry and frozen at that amount; a new order needs
+  free equity *now*.
+
+They agree almost everywhere. Where they don't, the fraction is sitting on a **1/n boundary** —
+n positions consume exactly the whole pool, and a rounding-scale move in equity decides whether
+the next one fits. `boundary_fractions(sweep(...))` names them:
+
+```
+  margen    max  perdido     CAGR   maxDD    MAR    CAGR 2x
+     20%      4     0.0%    32.8%   10.8%   3.04      72.2%
+     25%      4     0.0%    42.0%   13.4%   3.14      94.4%  <- borde
+     30%      3     1.4%    48.0%   16.0%   3.00     108.0%
+     40%      2    12.1%    55.0%   20.7%   2.66     122.7%
+     50%      2    12.1%    70.9%   25.4%   2.79     159.3%  <- borde
+```
+
+A boundary fraction is not wrong, it is *unstable*: its result depends on details that should not
+matter. Move to a neighbour. See [`examples/pool.py`](examples/pool.py).
+
+---
+
 ## Layout
 
 | File | What it does |
@@ -172,6 +220,7 @@ been flagged as a major risk turned out to be a small credit.
 | `bme/rules.py` | Exit rules, and the base class for your own |
 | `bme/engine.py` | The intrabar path walker |
 | `bme/estimate.py` | Validation, estimation, calibration, funding |
+| `bme/portfolio.py` | Shared capital pool: sizing, margin, leverage, skipped signals |
 | `bme/report.py` | Console tables |
 
 ---
