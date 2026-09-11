@@ -14,7 +14,7 @@ from .candles import Candle, CandleSeries, Binance, Bybit, get_provider
 from .engine import Fill, replay, replay_all
 from . import estimate
 from .estimate import Result, run, validate, compare, degradation, calibrate, funding_cost
-from . import rules
+from . import portfolio, rules
 
 __version__ = "0.1.0"
 __all__ = [
@@ -22,5 +22,5 @@ __all__ = [
     "Candle", "CandleSeries", "Binance", "Bybit", "get_provider",
     "Fill", "replay", "replay_all",
     "estimate", "Result", "run", "validate", "compare", "degradation", "calibrate", "funding_cost",
-    "rules",
+    "portfolio", "rules",
 ]
