@@ -2,10 +2,11 @@
 
 The whole method rests on one idea. A backtest on a 4h chart only knows each
 candle's open, high, low and close - not the order the market visited them. It
-has to guess, and TradingView's guess is that a bullish candle travelled
-open-low-high-close and a bearish one open-high-low-close. When most trades
-open and close inside a single candle, that guess decides most of the results,
-which is exactly what Bar Magnifier replaces with real lower-timeframe data.
+has to guess. TradingView's broker emulator guesses from where the open sits:
+closer to the high, the bar is taken to have gone open-high-low-close; closer
+to the low, open-low-high-close. When most trades open and close inside a
+single candle, that guess decides most of the results, which is exactly what
+Bar Magnifier replaces with real lower-timeframe data.
 
 Replaying the same rules against finer candles applies the same guess over a
 much shorter span, so the guess matters less and the answer moves towards what
@@ -17,14 +18,21 @@ Fill = collections.namedtuple("Fill", "signal pct bars")
 
 
 def path_of(candle, long):
-    """The prices a candle visits, in TradingView's assumed order.
+    """The two extremes a candle visits, in the order TradingView assumes.
 
-    Returns them already signed so positive is in the trade's favour.
+    The order follows the documented broker-emulator rule: an open closer to
+    the high means the high came first, an open closer to the low means the
+    low came first. An open exactly halfway is not specified; it is resolved
+    high-first here.
+
+    Only the extremes are returned. The open and close always lie between
+    them, so they can never cross a level the extremes do not - they matter
+    for the order, not as touch points. Prices are raw, and `long` does not
+    change the answer: the order is a property of the candle, not the trade.
     """
-    o, h, l, c = candle.open, candle.high, candle.low, candle.close
-    up, dn = (h, l) if long else (l, h)
-    bullish = (c >= o) if long else (c < o)
-    return (dn, up) if bullish else (up, dn)
+    if candle.high - candle.open <= candle.open - candle.low:
+        return (candle.high, candle.low)
+    return (candle.low, candle.high)
 
 
 def replay(entry_price, long, candles, rules, commission_pct=0.0):

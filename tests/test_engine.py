@@ -24,16 +24,29 @@ def bar(o, h, l, c, t=0):
 
 
 class TestIntrabarPath(unittest.TestCase):
-    def test_bullish_candle_visits_low_first(self):
-        self.assertEqual(path_of(bar(100, 110, 90, 105), long=True), (90, 110))
+    """TradingView's documented rule: where the open sits picks the order."""
 
-    def test_bearish_candle_visits_high_first(self):
-        self.assertEqual(path_of(bar(100, 110, 90, 95), long=True), (110, 90))
+    def test_open_near_the_high_visits_the_high_first(self):
+        self.assertEqual(path_of(bar(100, 102, 90, 95), long=True), (102, 90))
 
-    def test_short_reads_the_candle_inverted(self):
-        # A candle closing down is favourable for a short, so its favourable
-        # extreme (the low) must be visited last, as for a bullish long.
-        self.assertEqual(path_of(bar(100, 110, 90, 95), long=False), (110, 90))
+    def test_open_near_the_low_visits_the_low_first(self):
+        self.assertEqual(path_of(bar(100, 110, 98, 105), long=True), (98, 110))
+
+    def test_the_close_does_not_decide_the_order(self):
+        # Same open, high and low; one closes up, the other down. Ordering by
+        # candle colour - the rule this replaced - gets one of them wrong, and
+        # on the reference strategy that cost 3-4 points of match rate.
+        up = path_of(bar(100, 102, 90, 101), long=True)
+        down = path_of(bar(100, 102, 90, 91), long=True)
+        self.assertEqual(up, down)
+        self.assertEqual(up, (102, 90))
+
+    def test_trade_direction_does_not_change_the_order(self):
+        candle = bar(100, 110, 98, 105)
+        self.assertEqual(path_of(candle, long=True), path_of(candle, long=False))
+
+    def test_an_open_exactly_halfway_resolves_high_first(self):
+        self.assertEqual(path_of(bar(100, 110, 90, 100), long=True), (110, 90))
 
 
 class TestRulePriority(unittest.TestCase):
@@ -41,7 +54,7 @@ class TestRulePriority(unittest.TestCase):
         # Arms at +3, ratchets to +2.4, then price collapses through both the
         # trailing level and the fixed stop inside one candle.
         rules = [TrailingStop(activation=3.0, offset=0.6), StopLoss(5.0)]
-        fill = replay(100.0, True, [bar(100, 103, 103, 103), bar(103, 103, 90, 90)], rules)
+        fill = replay(100.0, True, [bar(100, 103, 100, 103), bar(103, 103, 90, 90)], rules)
         self.assertEqual(fill.signal, "Trailing")
         self.assertAlmostEqual(fill.pct, 2.4, places=6)
 
@@ -56,21 +69,22 @@ class TestRulePriority(unittest.TestCase):
         # market is assumed to visit first, not by how the rules are listed.
         # This is the single assumption Bar Magnifier replaces, so it is the
         # one worth pinning: rule order only breaks ties at the same price.
-        bearish = [bar(100, 104, 94, 94)]     # closes down -> high visited first
-        bullish = [bar(100, 104, 94, 103)]    # closes up   -> low visited first
+        near_high = [bar(100, 104, 94, 100)]   # open closer to the high -> high first
+        near_low = [bar(100, 108, 94, 100)]    # open closer to the low  -> low first
         for order in ([StopLoss(5.0), TakeProfit(3.0)], [TakeProfit(3.0), StopLoss(5.0)]):
-            self.assertEqual(replay(100.0, True, bearish, order).signal, "TP")
+            self.assertEqual(replay(100.0, True, near_high, order).signal, "TP")
         for order in ([StopLoss(5.0), TakeProfit(3.0)], [TakeProfit(3.0), StopLoss(5.0)]):
-            self.assertEqual(replay(100.0, True, bullish, order).signal, "SL")
+            self.assertEqual(replay(100.0, True, near_low, order).signal, "SL")
 
     def test_finer_candles_can_reverse_a_coarse_result(self):
-        # One coarse candle spanning 96 to 104: closing up, it is assumed to
-        # dip first, so the stop is recorded as hit. Split it and the rally
-        # came first, reaching the target while the dip was still ahead. Same
-        # rules, same prices, opposite outcome - the effect this measures.
+        # One coarse candle spanning 96 to 105 with its open nearer the low, so
+        # the dip is assumed first and the stop is recorded as hit. Split it
+        # and the rally came first, reaching the target while the dip was
+        # still ahead. Same rules, same prices, opposite outcome - the effect
+        # this library measures.
         rules = lambda: [StopLoss(3.5), TakeProfit(3.0)]
-        coarse = [bar(100, 104, 96, 103)]
-        fine = [bar(100, 104, 100, 104), bar(104, 104, 96, 96)]
+        coarse = [bar(100, 105, 96, 103)]
+        fine = [bar(100, 105, 100, 105), bar(105, 105, 96, 96)]
         self.assertEqual(replay(100.0, True, coarse, rules()).signal, "SL")
         self.assertEqual(replay(100.0, True, fine, rules()).signal, "TP")
 
