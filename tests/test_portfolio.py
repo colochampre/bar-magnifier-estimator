@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bme.portfolio import Trade, simulate, sweep, boundary_fractions, monthly
+from bme.portfolio import Trade, simulate, sweep, boundary_fractions, monthly, sequence
 
 BASE = datetime.datetime(2024, 1, 1)
 HOUR = datetime.timedelta(hours=1)
@@ -114,6 +114,76 @@ class TestGuards(unittest.TestCase):
     def test_unknown_admission_rule_is_rejected(self):
         with self.assertRaises(ValueError):
             simulate(spaced([1.0]), fraction=0.25, admission="whatever")
+
+
+class TestOnePerKey(unittest.TestCase):
+    """A symbol running one strategy cannot hold two positions at once."""
+
+    def overlapping(self):
+        # A's first trade is still open when A's second signal arrives; B is free.
+        return [Trade("A", BASE, BASE + 10 * HOUR, 1.0),
+                Trade("A", BASE + 2 * HOUR, BASE + 5 * HOUR, 1.0),
+                Trade("B", BASE + 2 * HOUR, BASE + 5 * HOUR, 1.0)]
+
+    def test_a_second_signal_on_a_busy_symbol_is_a_conflict(self):
+        r = simulate(self.overlapping(), fraction=0.2, one_per_key=True)
+        self.assertEqual((r.taken, r.skipped, r.conflicts), (2, 0, 1))
+        self.assertEqual(r.max_concurrent, 2)
+
+    def test_conflicts_do_not_count_as_lost_opportunity(self):
+        r = simulate(self.overlapping(), fraction=0.2, one_per_key=True)
+        self.assertEqual(r.skip_rate, 0.0)
+
+    def test_off_by_default(self):
+        r = simulate(self.overlapping(), fraction=0.2)
+        self.assertEqual((r.taken, r.conflicts, r.max_concurrent), (3, 0, 3))
+
+    def test_the_symbol_is_free_again_once_its_trade_closes(self):
+        trades = [Trade("A", BASE, BASE + 4 * HOUR, 1.0), Trade("A", BASE + 4 * HOUR, BASE + 8 * HOUR, 1.0)]
+        r = simulate(trades, fraction=0.2, one_per_key=True)
+        self.assertEqual((r.taken, r.conflicts), (2, 0))
+
+
+class TestSequence(unittest.TestCase):
+    """Replayed exits versus entries stamped at chart-bar resolution."""
+
+    CHART = 4 * 3600
+    HALF = datetime.timedelta(minutes=30)
+
+    def test_a_reentry_inside_the_exit_bar_is_kept(self):
+        # The first trade exits 4h30m in, inside the second chart bar, and the
+        # export re-enters at that bar's open - after the exit, stamped before it.
+        a = Trade("A", BASE, BASE + 4 * HOUR + self.HALF, 1.0)
+        b = Trade("A", BASE + 4 * HOUR, BASE + 8 * HOUR, 2.0)
+        kept, conflicts = sequence([a, b], self.CHART)
+        self.assertEqual((len(kept), conflicts), (2, 0))
+        self.assertEqual(kept[0].exit, b.entry)
+
+    def test_an_entry_before_the_exit_bar_is_dropped(self):
+        a = Trade("A", BASE, BASE + 9 * HOUR, 1.0)          # exits in the third bar
+        b = Trade("A", BASE + 4 * HOUR, BASE + 6 * HOUR, 2.0)
+        kept, conflicts = sequence([a, b], self.CHART)
+        self.assertEqual((len(kept), conflicts), (1, 1))
+        self.assertEqual(kept[0], a)
+
+    def test_an_exit_on_a_bar_boundary_belongs_to_the_bar_it_closes(self):
+        a = Trade("A", BASE, BASE + 4 * HOUR, 1.0)          # replay stamps the end of bar one
+        b = Trade("A", BASE + 4 * HOUR, BASE + 8 * HOUR, 2.0)
+        kept, conflicts = sequence([a, b], self.CHART)
+        self.assertEqual((len(kept), conflicts), (2, 0))
+        self.assertEqual(kept[0].exit, a.exit)
+
+    def test_keys_are_sequenced_independently(self):
+        a = Trade("A", BASE, BASE + 9 * HOUR, 1.0)
+        b = Trade("B", BASE + 4 * HOUR, BASE + 6 * HOUR, 2.0)
+        kept, conflicts = sequence([a, b], self.CHART)
+        self.assertEqual((len(kept), conflicts), (2, 0))
+
+    def test_sequenced_trades_never_conflict_in_the_pool(self):
+        a = Trade("A", BASE, BASE + 4 * HOUR + self.HALF, 1.0)
+        b = Trade("A", BASE + 4 * HOUR, BASE + 8 * HOUR, 2.0)
+        kept, _ = sequence([a, b], self.CHART)
+        self.assertEqual(simulate(kept, fraction=0.2, one_per_key=True).conflicts, 0)
 
 
 if __name__ == "__main__":
