@@ -110,6 +110,26 @@ class HTTPProvider:
     #: and replays trades against price action from the wrong period.
     newest_first = False
 
+    #: How many times an empty page is retried before it is believed.
+    #:
+    #: An empty page is ambiguous: it means either "no more history" or "you
+    #: are asking too fast". Believing it on the first try silently truncates
+    #: the series, and a truncated series does not raise - it replays trades
+    #: against price action from the wrong period. That cost two rounds of
+    #: plausible-looking nonsense before it was caught: 8.544% on a pair whose
+    #: honest number was 77%, because a year of candles was missing from the
+    #: middle of a run that hammered three timeframes per symbol.
+    empty_retries = 3
+
+    def _page(self, symbol, timeframe, start_ms, end_ms):
+        """One page, retried while it comes back empty."""
+        for attempt in range(self.empty_retries):
+            page = self._fetch_page(symbol, timeframe, start_ms, end_ms)
+            if page:
+                return page
+            time.sleep(self.throttle * 4 * (attempt + 1))
+        return []
+
     def series(self, symbol, timeframe, start, end):
         key = self._cache_path(self.name, symbol, timeframe,
                                int(start.timestamp()), int(end.timestamp()))
@@ -123,7 +143,7 @@ class HTTPProvider:
         if self.newest_first:
             cursor = ceiling
             while cursor > floor:
-                page = self._fetch_page(symbol, timeframe, floor, cursor)
+                page = self._page(symbol, timeframe, floor, cursor)
                 if not page:
                     break
                 out = page + out
@@ -135,7 +155,7 @@ class HTTPProvider:
         else:
             cursor = floor
             while cursor < ceiling:
-                page = self._fetch_page(symbol, timeframe, cursor, ceiling)
+                page = self._page(symbol, timeframe, cursor, ceiling)
                 if not page:
                     break
                 out += page

@@ -108,6 +108,33 @@ class TestPagination(unittest.TestCase):
         p = NewestFirst([], cache_dir=self.dir, throttle=0)
         self.assertEqual(p.series("X", "1h", self.start, self.end).candles, [])
 
+    def test_a_throttled_page_does_not_end_the_walk(self):
+        """An empty page means "no more history" or "you are asking too fast".
+
+        Believing it on the first try truncated a series mid-walk and cached
+        the piece as if it were whole, which is how a pair reported 8.544%
+        instead of 77%: the missing year was replayed against prices from
+        another period.
+        """
+        class Intermitente(NewestFirst):
+            def __init__(self, *a, **kw):
+                NewestFirst.__init__(self, *a, **kw)
+                self.vacias = 0
+
+            def _fetch_page(self, symbol, timeframe, start_ms, end_ms):
+                self.calls += 1
+                page = self._window(start_ms, end_ms)[-self.LIMIT:]
+                # Se queda sin aire una vez en el medio del recorrido.
+                if page and page[0].time != self.all[0].time and self.vacias < 1:
+                    self.vacias += 1
+                    return []
+                return page
+
+        p = Intermitente(self.candles, cache_dir=self.dir, throttle=0)
+        got = p.series("X", "1h", self.start, self.end).candles
+        self.assertEqual(p.vacias, 1)
+        self.assertEqual([c.time for c in got], [c.time for c in self.candles])
+
 
 class TestSeries(unittest.TestCase):
     def test_at_finds_the_candle_containing_a_timestamp(self):
