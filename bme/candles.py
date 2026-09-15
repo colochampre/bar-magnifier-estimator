@@ -38,7 +38,22 @@ class CandleSeries:
         return len(self.candles)
 
     def index_at(self, ts):
-        return bisect.bisect_left(self._times, int(ts.timestamp() * 1000))
+        """Index of the candle *containing* ``ts``.
+
+        The timestamp is floored to the timeframe boundary first, the same way
+        ``HTTPProvider.candle_at`` does it. Bisecting the raw value returns the
+        candle that *starts after* ``ts`` for anything not sitting exactly on a
+        boundary, so a lookup at 01:30 answers with the 02:00 candle and a
+        replay window silently skips the bar its trade opens in.
+
+        Every current caller passes boundary-aligned timestamps - entries come
+        from chart bars, and a 4h boundary is also a 5m one - which is why the
+        two semantics never disagreed in practice. That is what makes it worth
+        pinning rather than leaving to luck.
+        """
+        step = self.step * 1000
+        ms = (int(ts.timestamp() * 1000) // step) * step
+        return bisect.bisect_left(self._times, ms)
 
     def window(self, ts, count):
         i = self.index_at(ts)
@@ -85,6 +100,16 @@ class HTTPProvider:
         rows = self._fetch_page(symbol, timeframe, start, start + step)
         return rows[0] if rows else None
 
+    #: Which end of the requested range a full page comes from. Binance returns
+    #: the *oldest* candles in the window, so paging walks forward from the
+    #: start; Bybit returns the *newest*, so it has to walk backward from the
+    #: end. Getting this wrong does not fail loudly: paging forward against a
+    #: newest-first endpoint returns one page and stops, because the cursor
+    #: jumps straight to the end of the range. The caller then gets the last
+    #: 1000 candles whatever it asked for - four days instead of a year at 5m -
+    #: and replays trades against price action from the wrong period.
+    newest_first = False
+
     def series(self, symbol, timeframe, start, end):
         key = self._cache_path(self.name, symbol, timeframe,
                                int(start.timestamp()), int(end.timestamp()))
@@ -92,18 +117,37 @@ class HTTPProvider:
             raw = json.load(io.open(key, encoding="utf-8"))
             return CandleSeries([Candle(*c) for c in raw], SECONDS[timeframe])
 
-        out, cursor = [], int(start.timestamp() * 1000)
-        stop = int(end.timestamp() * 1000)
-        while cursor < stop:
-            page = self._fetch_page(symbol, timeframe, cursor, stop)
-            if not page:
-                break
-            out += page
-            nxt = page[-1].time + 1
-            if nxt <= cursor:
-                break
-            cursor = nxt
-            time.sleep(self.throttle)
+        floor = int(start.timestamp() * 1000)
+        ceiling = int(end.timestamp() * 1000)
+        out = []
+        if self.newest_first:
+            cursor = ceiling
+            while cursor > floor:
+                page = self._fetch_page(symbol, timeframe, floor, cursor)
+                if not page:
+                    break
+                out = page + out
+                nxt = page[0].time - 1
+                if nxt >= cursor:
+                    break
+                cursor = nxt
+                time.sleep(self.throttle)
+        else:
+            cursor = floor
+            while cursor < ceiling:
+                page = self._fetch_page(symbol, timeframe, cursor, ceiling)
+                if not page:
+                    break
+                out += page
+                nxt = page[-1].time + 1
+                if nxt <= cursor:
+                    break
+                cursor = nxt
+                time.sleep(self.throttle)
+
+        # Pages can overlap at their boundaries, and a replay silently produces
+        # nonsense on a series that is out of order or repeats a candle.
+        out = sorted({c.time: c for c in out}.values(), key=lambda c: c.time)
         json.dump([list(c) for c in out], io.open(key, "w", encoding="utf-8"))
         return CandleSeries(out, SECONDS[timeframe])
 
@@ -149,6 +193,8 @@ class Bybit(HTTPProvider):
 
     name = "bybit"
     BASE = "https://api.bybit.com/v5/market"
+    #: A page is the newest candles in the window, counted back from `end`.
+    newest_first = True
     _TF = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
            "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720", "1d": "D"}
 
